@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "flux-playground",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+
+  // Workers AI binding -> env.AI
+  "ai": { "binding": "AI" },
+
+  // Import the UI as a plain string
+  "rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }]
+}

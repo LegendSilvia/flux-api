@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLUX Playground</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70;
+    --line: #e2e0da; --accent: #3b5bdb; --accent-ink: #ffffff; --err: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141416; --panel: #1d1d21; --ink: #ececef; --muted: #9a9aa3;
+      --line: #2e2e34; --accent: #748ffc; --accent-ink: #0d0d10; --err: #ff8787;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px;
+    display: grid; grid-template-columns: 360px 1fr; gap: 20px; }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 16px; font-size: 13px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  label { display: block; font-size: 12px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 6px; }
+  textarea, select, input { width: 100%; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  textarea { min-height: 120px; resize: vertical; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  button { margin-top: 18px; width: 100%; padding: 10px; font: inherit; font-weight: 600;
+    background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: progress; }
+  .stage { min-height: 420px; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 10px; }
+  .stage img { max-width: 100%; border-radius: 8px; }
+  .meta { font-size: 13px; color: var(--muted); }
+  .error { color: var(--err); white-space: pre-wrap; font-size: 13px; }
+  .history { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; margin-top: 16px; }
+  .history img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); }
+  .hidden { display: none; }
+  a.dl { color: var(--accent); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>FLUX Playground</h1>
+    <p class="sub">Workers AI · Black Forest Labs FLUX</p>
+    <form id="f" class="panel">
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt" name="prompt" maxlength="2048" required
+        placeholder="isometric low-poly treasure chest, game asset, plain white background, soft studio lighting"></textarea>
+
+      <label for="model">Model</label>
+      <select id="model" name="model"></select>
+
+      <div id="sizeBox">
+        <label for="size">Size</label>
+        <select id="size">
+          <option value="1024x1024">1024 × 1024 (square)</option>
+          <option value="768x768">768 × 768</option>
+          <option value="512x512">512 × 512</option>
+          <option value="1216x832">1216 × 832 (landscape)</option>
+          <option value="832x1216">832 × 1216 (portrait)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <div id="stepsBox">
+          <label for="steps">Steps</label>
+          <input id="steps" name="steps" type="number">
+        </div>
+        <div>
+          <label for="seed">Seed</label>
+          <input id="seed" name="seed" type="number" min="0" placeholder="random">
+        </div>
+      </div>
+
+      <div id="refBox">
+        <label for="ref">Reference image (optional)</label>
+        <input id="ref" type="file" accept="image/*">
+        <p class="hint">Downscaled to under 512 px before upload. Refer to it as “image 0” in the prompt.</p>
+      </div>
+
+      <div id="keyBox">
+        <label for="key">Access key</label>
+        <input id="key" type="password" placeholder="the ACCESS_KEY secret">
+      </div>
+
+      <button id="go" type="submit">Generate</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div id="stage" class="stage"><p class="meta">Your image appears here.</p></div>
+    <div id="history" class="history"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  var models = [];
+  var $ = function (id) { return document.getElementById(id); };
+
+  function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+  var savedKey = recall("flux-key");
+  if (savedKey) $("key").value = savedKey;
+
+  function syncModel() {
+    var m = models.find(function (x) { return x.key === $("model").value; });
+    if (!m) return;
+    $("sizeBox").classList.toggle("hidden", !m.size);
+    $("refBox").classList.toggle("hidden", !m.ref);
+    $("stepsBox").classList.toggle("hidden", !m.steps);
+    if (m.steps) {
+      $("steps").min = m.steps.min; $("steps").max = m.steps.max; $("steps").value = m.steps.default;
+    }
+    store("flux-model", m.key);
+  }
+
+  fetch("/models").then(function (r) { return r.json(); }).then(function (list) {
+    models = list;
+    $("model").innerHTML = list.map(function (m) {
+      return '<option value="' + m.key + '">' + m.label + "</option>";
+    }).join("");
+    var saved = recall("flux-model");
+    if (saved && list.some(function (m) { return m.key === saved; })) $("model").value = saved;
+    else $("model").value = "flux-2-klein-4b";
+    syncModel();
+  });
+  $("model").addEventListener("change", syncModel);
+
+  // Downscale a user image so its longest side is under 512 px, return a PNG blob.
+  function shrink(file) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () {
+        var scale = Math.min(1, 496 / Math.max(img.width, img.height));
+        var c = document.createElement("canvas");
+        c.width = Math.round(img.width * scale);
+        c.height = Math.round(img.height * scale);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        c.toBlob(function (b) { b ? resolve(b) : reject(new Error("Could not read image")); }, "image/png");
+        URL.revokeObjectURL(img.src);
+      };
+      img.onerror = function () { reject(new Error("Could not read image")); };
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  function show(src, info) {
+    $("stage").innerHTML = "";
+    var img = document.createElement("img");
+    img.src = src;
+    var meta = document.createElement("p");
+    meta.className = "meta";
+    meta.textContent = info;
+    var a = document.createElement("a");
+    a.className = "dl"; a.href = src; a.download = "flux-" + Date.now() + (src.indexOf("image/png") > -1 ? ".png" : ".jpg");
+    a.textContent = "Download";
+    $("stage").append(img, meta, a);
+  }
+
+  $("f").addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    var m = models.find(function (x) { return x.key === $("model").value; });
+    var body = new FormData();
+    body.append("prompt", $("prompt").value);
+    body.append("model", $("model").value);
+    if (m && m.size) {
+      var wh = $("size").value.split("x");
+      body.append("width", wh[0]); body.append("height", wh[1]);
+    }
+    if (m && m.steps) body.append("steps", $("steps").value);
+    if ($("seed").value !== "") body.append("seed", $("seed").value);
+
+    $("go").disabled = true; $("go").textContent = "Generating…";
+    $("stage").innerHTML = '<p class="meta">Working…</p>';
+    try {
+      if (m && m.ref && $("ref").files[0]) body.append("ref", await shrink($("ref").files[0]), "ref.png");
+      var key = $("key").value.trim();
+      store("flux-key", key);
+      var res = await fetch("/generate", { method: "POST", body: body, headers: key ? { "x-access-key": key } : {} });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+      var src = "data:" + data.mime + ";base64," + data.image;
+      var info = data.model + " · " + (data.ms / 1000).toFixed(1) + " s";
+      show(src, info);
+      var thumb = document.createElement("img");
+      thumb.src = src; thumb.title = $("prompt").value;
+      thumb.addEventListener("click", function () { show(src, info); });
+      $("history").prepend(thumb);
+    } catch (err) {
+      $("stage").innerHTML = "";
+      var p = document.createElement("p");
+      p.className = "error"; p.textContent = err.message;
+      $("stage").append(p);
+    } finally {
+      $("go").disabled = false; $("go").textContent = "Generate";
+    }
+  });
+})();
+</script>
+</body>
+</html>
