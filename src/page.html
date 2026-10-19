@@ -54,30 +54,36 @@
 <main>
   <section>
     <h1>FLUX Playground</h1>
-    <p class="sub">Workers AI · Black Forest Labs FLUX</p>
+    <p class="sub" id="sub">Workers AI · FLUX.2 [klein] 4B</p>
     <form id="f" class="panel">
       <label for="prompt">Prompt</label>
       <textarea id="prompt" name="prompt" maxlength="2048" required
-        placeholder="isometric low-poly treasure chest, game asset, plain white background, soft studio lighting"></textarea>
-
-      <label for="model">Model</label>
-      <select id="model" name="model"></select>
-
-      <div id="sizeBox">
-        <label for="size">Size</label>
-        <select id="size">
-          <option value="1024x1024">1024 × 1024 (square)</option>
-          <option value="768x768">768 × 768</option>
-          <option value="512x512">512 × 512</option>
-          <option value="1216x832">1216 × 832 (landscape)</option>
-          <option value="832x1216">832 × 1216 (portrait)</option>
-        </select>
-      </div>
+        placeholder="treasure chest overflowing with gold coins"></textarea>
 
       <div class="row">
-        <div id="stepsBox">
-          <label for="steps">Steps</label>
-          <input id="steps" name="steps" type="number">
+        <div>
+          <label for="scenario">Scenario</label>
+          <select id="scenario"></select>
+        </div>
+        <div>
+          <label for="style">Style</label>
+          <select id="style"></select>
+        </div>
+      </div>
+      <p id="scenarioHint" class="hint"></p>
+
+      <div class="row">
+        <div>
+          <label for="size">Size</label>
+          <select id="size">
+            <option value="1024x1024">1024 × 1024 (square)</option>
+            <option value="768x768">768 × 768</option>
+            <option value="512x512">512 × 512</option>
+            <option value="1216x832">1216 × 832 (landscape)</option>
+            <option value="832x1216">832 × 1216 (portrait)</option>
+            <option value="1536x864">1536 × 864 (16:9)</option>
+            <option value="864x1536">864 × 1536 (9:16)</option>
+          </select>
         </div>
         <div>
           <label for="seed">Seed</label>
@@ -89,7 +95,7 @@
       <p class="hint">Removes the background after generation. No need to mention it in the prompt.</p>
 
       <div id="refBox">
-        <label for="ref">Reference image (optional)</label>
+        <label for="ref" id="refLabel">Reference image (optional)</label>
         <input id="ref" type="file" accept="image/*">
         <p class="hint">Downscaled to under 512 px before upload. Refer to it as “image 0” in the prompt.</p>
       </div>
@@ -111,7 +117,7 @@
 
 <script>
 (function () {
-  var models = [];
+  var api = null;
   var $ = function (id) { return document.getElementById(id); };
 
   function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -120,29 +126,38 @@
   var savedKey = recall("flux-key");
   if (savedKey) $("key").value = savedKey;
 
-  function syncModel() {
-    var m = models.find(function (x) { return x.key === $("model").value; });
-    if (!m) return;
-    $("sizeBox").classList.toggle("hidden", !m.size);
-    $("refBox").classList.toggle("hidden", !m.ref);
-    $("stepsBox").classList.toggle("hidden", !m.steps);
-    if (m.steps) {
-      $("steps").min = m.steps.min; $("steps").max = m.steps.max; $("steps").value = m.steps.default;
-    }
-    store("flux-model", m.key);
+  function options(list) {
+    return list.map(function (x) { return '<option value="' + x.key + '">' + x.label + "</option>"; }).join("");
   }
 
-  fetch("/models").then(function (r) { return r.json(); }).then(function (list) {
-    models = list;
-    $("model").innerHTML = list.map(function (m) {
-      return '<option value="' + m.key + '">' + m.label + "</option>";
-    }).join("");
-    var saved = recall("flux-model");
-    if (saved && list.some(function (m) { return m.key === saved; })) $("model").value = saved;
-    else $("model").value = "flux-2-klein-4b";
-    syncModel();
+  function scenario() {
+    return api && api.scenarios.find(function (x) { return x.key === $("scenario").value; });
+  }
+
+  // Apply the scenario's defaults to the controls; the user can still change them afterwards.
+  function syncScenario() {
+    var sc = scenario();
+    if (!sc) return;
+    var size = sc.defaults.width + "x" + sc.defaults.height;
+    if ([].some.call($("size").options, function (o) { return o.value === size; })) $("size").value = size;
+    $("transparent").checked = sc.defaults.transparent;
+    $("scenarioHint").textContent = sc.description + " ~" + sc.estimated_neurons + " neurons.";
+    $("refLabel").textContent = sc.requires_ref ? "Reference image (required)" : "Reference image (optional)";
+    store("flux-scenario", sc.key);
+  }
+
+  fetch("/api").then(function (r) { return r.json(); }).then(function (d) {
+    api = d;
+    $("sub").textContent = "Workers AI · " + d.model.label;
+    $("scenario").innerHTML = options(d.scenarios);
+    $("style").innerHTML = options(d.styles);
+    var sc = recall("flux-scenario"), st = recall("flux-style");
+    if (sc && d.scenarios.some(function (x) { return x.key === sc; })) $("scenario").value = sc;
+    if (st && d.styles.some(function (x) { return x.key === st; })) $("style").value = st;
+    syncScenario();
   });
-  $("model").addEventListener("change", syncModel);
+  $("scenario").addEventListener("change", syncScenario);
+  $("style").addEventListener("change", function () { store("flux-style", $("style").value); });
 
   // Downscale a user image so its longest side is under 512 px, return a PNG blob.
   function shrink(file) {
@@ -177,29 +192,26 @@
 
   $("f").addEventListener("submit", async function (ev) {
     ev.preventDefault();
-    var m = models.find(function (x) { return x.key === $("model").value; });
     var body = new FormData();
+    var wh = $("size").value.split("x");
     body.append("prompt", $("prompt").value);
-    body.append("model", $("model").value);
-    if (m && m.size) {
-      var wh = $("size").value.split("x");
-      body.append("width", wh[0]); body.append("height", wh[1]);
-    }
-    if (m && m.steps) body.append("steps", $("steps").value);
+    body.append("scenario", $("scenario").value);
+    body.append("style", $("style").value);
+    body.append("width", wh[0]); body.append("height", wh[1]);
+    body.append("transparent", $("transparent").checked ? "1" : "0");
     if ($("seed").value !== "") body.append("seed", $("seed").value);
-    if ($("transparent").checked) body.append("transparent", "1");
 
     $("go").disabled = true; $("go").textContent = "Generating…";
     $("stage").innerHTML = '<p class="meta">Working…</p>';
     try {
-      if (m && m.ref && $("ref").files[0]) body.append("ref", await shrink($("ref").files[0]), "ref.png");
+      if ($("ref").files[0]) body.append("ref", await shrink($("ref").files[0]), "ref.png");
       var key = $("key").value.trim();
       store("flux-key", key);
       var res = await fetch("/generate", { method: "POST", body: body, headers: key ? { "x-access-key": key } : {} });
       var data = await res.json();
       if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
       var src = "data:" + data.mime + ";base64," + data.image;
-      var info = data.model + " · " + (data.ms / 1000).toFixed(1) + " s" + (data.transparent ? " · transparent" : "") +
+      var info = data.scenario + (data.style !== "none" ? " / " + data.style : "") + " · " + (data.ms / 1000).toFixed(1) + " s" + (data.transparent ? " · transparent" : "") +
         (data.estimated_neurons ? " · ~" + data.estimated_neurons + " neurons" : "");
       if (data.warning) info += " · " + data.warning;
       show(src, info);
