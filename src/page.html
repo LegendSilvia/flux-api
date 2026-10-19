@@ -43,6 +43,10 @@
   .history img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; cursor: pointer;
     border: 1px solid var(--line); }
   .hidden { display: none; }
+  label.check { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0;
+    font-size: 14px; color: var(--ink); font-weight: 500; }
+  label.check input { width: auto; margin: 0; }
+  .stage img, .history img { background: repeating-conic-gradient(#8884 0 25%, #0000 0 50%) 0 0 / 16px 16px; }
   a.dl { color: var(--accent); font-size: 13px; }
 </style>
 </head>
@@ -80,6 +84,9 @@
           <input id="seed" name="seed" type="number" min="0" placeholder="random">
         </div>
       </div>
+
+      <label class="check"><input id="transparent" type="checkbox"> Transparent background (PNG)</label>
+      <p class="hint">Removes the background after generation. No need to mention it in the prompt.</p>
 
       <div id="refBox">
         <label for="ref">Reference image (optional)</label>
@@ -180,6 +187,7 @@
     }
     if (m && m.steps) body.append("steps", $("steps").value);
     if ($("seed").value !== "") body.append("seed", $("seed").value);
+    if ($("transparent").checked) body.append("transparent", "1");
 
     $("go").disabled = true; $("go").textContent = "Generating…";
     $("stage").innerHTML = '<p class="meta">Working…</p>';
@@ -191,7 +199,8 @@
       var data = await res.json();
       if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
       var src = "data:" + data.mime + ";base64," + data.image;
-      var info = data.model + " · " + (data.ms / 1000).toFixed(1) + " s";
+      var info = data.model + " · " + (data.ms / 1000).toFixed(1) + " s" + (data.transparent ? " · transparent" : "");
+      if (data.warning) info += " · " + data.warning;
       show(src, info);
       var thumb = document.createElement("img");
       thumb.src = src; thumb.title = $("prompt").value;

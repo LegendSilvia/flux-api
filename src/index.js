@@ -5,8 +5,13 @@ import PAGE from "./page.html";
  *
  * GET  /          -> web UI
  * GET  /models    -> model list (JSON)
- * POST /generate  -> multipart form: prompt, model, width, height, steps, seed, ref (optional image)
- *                    returns JSON { image (base64), mime, model, ms }
+ * POST /generate  -> multipart form: prompt, model, width, height, steps, seed, ref (optional image),
+ *                    transparent ("1"/"true" for a PNG with the background removed)
+ *                    returns JSON { image (base64), mime, model, ms, transparent, prompt }
+ *
+ * FLUX can't output alpha; asked for "transparent" it paints a checkerboard. So with transparent=1 the
+ * Worker strips that wording, asks for a plain background, then cuts the subject out with the Images
+ * binding (segment: "foreground"). If the cut-out fails, the opaque image comes back with `warning`.
  *
  * Protection: set a secret ACCESS_KEY (`npx wrangler secret put ACCESS_KEY`, or the dashboard).
  * /generate requires header `x-access-key: <value>`, and refuses all requests until the secret exists
@@ -67,6 +72,34 @@ const snapSize = (value) => {
   return Math.round(n / 16) * 16;
 };
 
+const TRANSPARENCY_WORDS =
+  /[,;]?\s*\b(?:(?:on|with|in)\s+(?:an?\s+)?)?(?:transparen\w*|alpha|checker(?:ed|board)?)(?:\s+(?:background|backgroud|bg))?\b|\bpng\b/gi;
+const PLAIN_BACKGROUND =
+  "centered, isolated subject on a plain flat solid-color background, no shadow, no checkerboard pattern";
+
+// Rewrite a prompt so the model draws a background that's easy to cut out.
+const prepTransparentPrompt = (prompt) => {
+  const cleaned = prompt.replace(TRANSPARENCY_WORDS, "").replace(/\s+([,;])/g, "$1").replace(/\s{2,}/g, " ").replace(/[\s,;]+$/, "").trim();
+  return `${cleaned || prompt}, ${PLAIN_BACKGROUND}`;
+};
+
+const base64ToBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+const bytesToBase64 = (bytes) => {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+};
+
+async function removeBackground(env, b64) {
+  const output = await env.IMAGES.input(new Blob([base64ToBytes(b64)]).stream())
+    .transform({ segment: "foreground" })
+    .output({ format: "image/png" });
+  return bytesToBase64(new Uint8Array(await output.response().arrayBuffer()));
+}
+
 const sniffMime = (b64) => {
   if (b64.startsWith("iVBOR")) return "image/png";
   if (b64.startsWith("UklGR")) return "image/webp";
@@ -88,9 +121,12 @@ async function generate(request, env) {
     return json({ error: "Send the request as multipart/form-data." }, 400);
   }
 
-  const prompt = String(form.get("prompt") || "").trim();
-  if (!prompt) return json({ error: "Prompt is required." }, 400);
-  if (prompt.length > 2048) return json({ error: "Prompt is longer than 2048 characters." }, 400);
+  const rawPrompt = String(form.get("prompt") || "").trim();
+  if (!rawPrompt) return json({ error: "Prompt is required." }, 400);
+  if (rawPrompt.length > 2048) return json({ error: "Prompt is longer than 2048 characters." }, 400);
+
+  const transparent = ["1", "true", "on", "yes"].includes(String(form.get("transparent") || "").toLowerCase());
+  const prompt = transparent ? prepTransparentPrompt(rawPrompt) : rawPrompt;
 
   const key = String(form.get("model") || "flux-2-klein-4b");
   const model = MODELS[key];
@@ -148,7 +184,18 @@ async function generate(request, env) {
   const image = result?.image;
   if (!image) return json({ error: "Model returned no image.", raw: result }, 502);
 
-  return json({ image, mime: sniffMime(image), model: key, ms: Date.now() - started });
+  const meta = { model: key, prompt, transparent: false };
+  if (transparent) {
+    try {
+      const cutout = await removeBackground(env, image);
+      return json({ image: cutout, mime: "image/png", ...meta, transparent: true, ms: Date.now() - started });
+    } catch (err) {
+      console.error("Background removal failed", err);
+      meta.warning = `Background removal failed, returning the opaque image: ${err?.message || err}`;
+    }
+  }
+
+  return json({ image, mime: sniffMime(image), ...meta, ms: Date.now() - started });
 }
 
 export default {

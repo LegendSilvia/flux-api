@@ -8,6 +8,9 @@
   // Workers AI binding -> env.AI
   "ai": { "binding": "AI" },
 
+  // Images binding -> env.IMAGES (background removal for transparent=1)
+  "images": { "binding": "IMAGES" },
+
   // Import the UI as a plain string
   "rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }]
 }
