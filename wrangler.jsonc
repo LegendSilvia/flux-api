@@ -11,6 +11,11 @@
   // Images binding -> env.IMAGES (background removal for transparent=1)
   "images": { "binding": "IMAGES" },
 
+  // Spend counters for the budget guard -> env.USAGE (table: usage(period TEXT PRIMARY KEY, amount REAL))
+  "d1_databases": [
+    { "binding": "USAGE", "database_name": "flux-usage", "database_id": "e831b7f9-66ae-4b11-ba5c-db40dfbef63e" }
+  ],
+
   // Import the UI as a plain string
   "rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }]
 }

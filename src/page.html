@@ -199,7 +199,8 @@
       var data = await res.json();
       if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
       var src = "data:" + data.mime + ";base64," + data.image;
-      var info = data.model + " · " + (data.ms / 1000).toFixed(1) + " s" + (data.transparent ? " · transparent" : "");
+      var info = data.model + " · " + (data.ms / 1000).toFixed(1) + " s" + (data.transparent ? " · transparent" : "") +
+        (data.estimated_neurons ? " · ~" + data.estimated_neurons + " neurons" : "");
       if (data.warning) info += " · " + data.warning;
       show(src, info);
       var thumb = document.createElement("img");

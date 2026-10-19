@@ -13,11 +13,22 @@ import PAGE from "./page.html";
  * Worker strips that wording, asks for a plain background, then cuts the subject out with the Images
  * binding (segment: "foreground"). If the cut-out fails, the opaque image comes back with `warning`.
  *
+ * GET  /usage     -> today's Workers AI neurons and this month's background removals vs. the caps
+ *
+ * Budget guard: every call reserves its estimated cost in D1 (binding USAGE) before running, and is
+ * refused with 429 if that would pass the cap. Caps default to just under the free allowances
+ * (10,000 neurons/day, 5,000 Images transformations/month); override with vars NEURON_DAILY_LIMIT
+ * and IMAGES_MONTHLY_LIMIT. Estimates use Cloudflare's published per-model neuron prices.
+ *
  * Protection: set a secret ACCESS_KEY (`npx wrangler secret put ACCESS_KEY`, or the dashboard).
  * /generate requires header `x-access-key: <value>`, and refuses all requests until the secret exists
  * (fails closed, so a Git-driven first deploy can't expose Workers AI usage). For `wrangler dev`,
  * put ACCESS_KEY in .dev.vars.
  */
+
+// Neuron estimates from https://developers.cloudflare.com/workers-ai/platform/pricing/
+// (tiles are 512x512, rounded up; `ref` is the input image when one is sent).
+const tiles = (w, h) => Math.ceil(w / 512) * Math.ceil(h / 512);
 
 const MODELS = {
   "flux-1-schnell": {
@@ -27,6 +38,7 @@ const MODELS = {
     steps: { min: 1, max: 8, default: 4 },
     size: false,
     ref: false,
+    cost: ({ steps }) => 4.8 * tiles(1024, 1024) + 9.6 * steps,
   },
   "flux-2-klein-4b": {
     id: "@cf/black-forest-labs/flux-2-klein-4b",
@@ -35,6 +47,7 @@ const MODELS = {
     steps: null, // fixed at 4 on Workers AI
     size: true,
     ref: true,
+    cost: ({ w, h, ref }) => 26.05 * tiles(w, h) + (ref ? 5.37 : 0),
   },
   "flux-2-klein-9b": {
     id: "@cf/black-forest-labs/flux-2-klein-9b",
@@ -43,6 +56,7 @@ const MODELS = {
     steps: null,
     size: true,
     ref: true,
+    cost: ({ w, h, ref }) => 1363.64 + 181.82 * Math.ceil(Math.max(0, (w * h) / 1048576 - 1)) + (ref ? 181.82 : 0),
   },
   "flux-2-dev": {
     id: "@cf/black-forest-labs/flux-2-dev",
@@ -51,8 +65,56 @@ const MODELS = {
     steps: { min: 1, max: 50, default: 25 },
     size: true,
     ref: true,
+    cost: ({ w, h, steps, ref }) => (37.5 * tiles(w, h) + (ref ? 18.75 : 0)) * steps,
   },
 };
+
+const DEFAULT_NEURON_DAILY_LIMIT = 9500;
+const DEFAULT_IMAGES_MONTHLY_LIMIT = 4900;
+
+const limits = (env) => ({
+  neurons: Number(env.NEURON_DAILY_LIMIT) || DEFAULT_NEURON_DAILY_LIMIT,
+  images: Number(env.IMAGES_MONTHLY_LIMIT) || DEFAULT_IMAGES_MONTHLY_LIMIT,
+});
+
+// Counters reset with Cloudflare's allowances: neurons at 00:00 UTC, Images monthly.
+const periods = () => {
+  const iso = new Date().toISOString();
+  return { neurons: `neurons:${iso.slice(0, 10)}`, images: `images:${iso.slice(0, 7)}` };
+};
+
+// Atomically add `amount` to a counter unless that would pass `limit`. Returns the new total or null.
+async function reserve(env, period, amount, limit) {
+  if (amount > limit) return null;
+  const row = await env.USAGE.prepare(
+    `INSERT INTO usage (period, amount) VALUES (?1, CAST(?2 AS REAL))
+     ON CONFLICT (period) DO UPDATE SET amount = amount + excluded.amount
+     WHERE amount + excluded.amount <= CAST(?3 AS REAL)
+     RETURNING amount`,
+  )
+    .bind(period, amount, limit)
+    .first();
+  return row ? row.amount : null;
+}
+
+const refund = (env, period, amount) =>
+  env.USAGE.prepare("UPDATE usage SET amount = MAX(0, amount - ?2) WHERE period = ?1").bind(period, amount).run();
+
+async function readUsage(env) {
+  const p = periods();
+  const { results } = await env.USAGE.prepare("SELECT period, amount FROM usage WHERE period IN (?1, ?2)")
+    .bind(p.neurons, p.images)
+    .all();
+  const get = (k) => results.find((r) => r.period === k)?.amount || 0;
+  const l = limits(env);
+  return {
+    neurons_today: Math.round(get(p.neurons)),
+    neuron_daily_limit: l.neurons,
+    background_removals_this_month: get(p.images),
+    background_removal_monthly_limit: l.images,
+    resets: "neurons at 00:00 UTC daily; background removals on the 1st of each month (UTC)",
+  };
+}
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -113,6 +175,9 @@ async function generate(request, env) {
   if (request.headers.get("x-access-key") !== env.ACCESS_KEY) {
     return json({ error: "Missing or wrong access key." }, 401);
   }
+  if (!env.USAGE) {
+    return json({ error: "USAGE (D1) binding is missing; generation is disabled so spend can't be capped." }, 503);
+  }
 
   let form;
   try {
@@ -135,34 +200,47 @@ async function generate(request, env) {
   const seedRaw = form.get("seed");
   const seed = seedRaw === null || seedRaw === "" ? null : clampInt(seedRaw, 0, 2147483647, null);
 
+  const steps = model.steps
+    ? clampInt(form.get("steps"), model.steps.min, model.steps.max, model.steps.default)
+    : null;
+  const w = model.size ? snapSize(form.get("width")) : 1024;
+  const h = model.size ? snapSize(form.get("height")) : 1024;
+  const ref = form.get("ref");
+  const hasRef = Boolean(model.ref && ref && typeof ref !== "string" && ref.size > 0);
+
+  const p = periods();
+  const lim = limits(env);
+  const neurons = Math.ceil(model.cost({ w, h, steps, ref: hasRef }));
+  if ((await reserve(env, p.neurons, neurons, lim.neurons)) === null) {
+    return json(
+      {
+        error: `Daily Workers AI budget reached: this request needs ~${neurons} neurons. Resets at 00:00 UTC.`,
+        estimated_neurons: neurons,
+        usage: await readUsage(env),
+      },
+      429,
+    );
+  }
+
   const started = Date.now();
   let result;
 
   try {
     if (!model.multipart) {
       // FLUX.1 [schnell]: plain JSON input
-      const input = {
-        prompt,
-        steps: clampInt(form.get("steps"), model.steps.min, model.steps.max, model.steps.default),
-      };
+      const input = { prompt, steps };
       if (seed !== null) input.seed = seed;
       result = await env.AI.run(model.id, input);
     } else {
       // FLUX.2 models: multipart input, even for prompt-only requests
       const body = new FormData();
       body.append("prompt", prompt);
-      body.append("width", String(snapSize(form.get("width"))));
-      body.append("height", String(snapSize(form.get("height"))));
-      if (model.steps) {
-        body.append(
-          "steps",
-          String(clampInt(form.get("steps"), model.steps.min, model.steps.max, model.steps.default)),
-        );
-      }
+      body.append("width", String(w));
+      body.append("height", String(h));
+      if (steps !== null) body.append("steps", String(steps));
       if (seed !== null) body.append("seed", String(seed));
 
-      const ref = form.get("ref");
-      if (model.ref && ref && typeof ref !== "string" && ref.size > 0) {
+      if (hasRef) {
         // Reference images must be under 512x512; the UI downscales before upload.
         body.append("input_image_0", ref, "ref.png");
       }
@@ -178,20 +256,27 @@ async function generate(request, env) {
     }
   } catch (err) {
     console.error("AI.run failed", key, err);
+    await refund(env, p.neurons, neurons);
     return json({ error: `Model call failed: ${err?.message || err}` }, 502);
   }
 
   const image = result?.image;
   if (!image) return json({ error: "Model returned no image.", raw: result }, 502);
 
-  const meta = { model: key, prompt, transparent: false };
+  const meta = { model: key, prompt, transparent: false, estimated_neurons: neurons };
   if (transparent) {
-    try {
-      const cutout = await removeBackground(env, image);
-      return json({ image: cutout, mime: "image/png", ...meta, transparent: true, ms: Date.now() - started });
-    } catch (err) {
-      console.error("Background removal failed", err);
-      meta.warning = `Background removal failed, returning the opaque image: ${err?.message || err}`;
+    if ((await reserve(env, p.images, 1, lim.images)) === null) {
+      meta.warning = "Monthly background-removal budget reached; returning the opaque image.";
+    } else {
+      try {
+        const cutout = await removeBackground(env, image);
+        meta.transparent = true;
+        return json({ image: cutout, mime: "image/png", ...meta, ms: Date.now() - started });
+      } catch (err) {
+        console.error("Background removal failed", err);
+        await refund(env, p.images, 1);
+        meta.warning = `Background removal failed, returning the opaque image: ${err?.message || err}`;
+      }
     }
   }
 
@@ -214,8 +299,14 @@ export default {
           steps: m.steps,
           size: m.size,
           ref: m.ref,
+          neurons_at_1024: Math.ceil(m.cost({ w: 1024, h: 1024, steps: m.steps?.default, ref: false })),
         })),
       );
+    }
+
+    if (request.method === "GET" && pathname === "/usage") {
+      if (!env.USAGE) return json({ error: "USAGE (D1) binding is missing." }, 503);
+      return json(await readUsage(env));
     }
 
     if (request.method === "POST" && pathname === "/generate") {
