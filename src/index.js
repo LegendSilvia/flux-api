@@ -421,7 +421,18 @@ async function generate(request, env) {
   } catch (err) {
     console.error("AI.run failed", err);
     await refund(env, p.neurons, neurons);
-    return json({ error: `Model call failed: ${err?.message || err}` }, 502);
+    const message = String(err?.message || err);
+    // Cloudflare's own free-allocation limit (3036 / 4006): tell callers to stop, not retry.
+    if (/\b(3036|4006)\b|free allocation/i.test(message)) {
+      return json(
+        {
+          error: `Cloudflare's daily Workers AI free allocation is used up for this account. Resets at 00:00 UTC. (${message})`,
+          usage: await readUsage(env),
+        },
+        429,
+      );
+    }
+    return json({ error: `Model call failed: ${message}` }, 502);
   }
 
   const image = result?.image;

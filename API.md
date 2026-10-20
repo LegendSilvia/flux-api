@@ -88,7 +88,7 @@ Check `transparent` in the response: if you asked for it and it is `false`, read
 |---|---|---|
 | 400 | Bad input; `error` names the field and lists valid values | Fix the field and retry |
 | 401 | Missing or wrong `x-access-key` | Check the key |
-| 429 | Daily budget reached | Stop until 00:00 UTC; don't retry in a loop |
+| 429 | Daily budget reached (this API's cap, or Cloudflare's free allocation) | Stop until 00:00 UTC; don't retry in a loop |
 | 502 | Model call failed | Retry once later |
 | 503 | Worker not configured | Tell the owner |
 
